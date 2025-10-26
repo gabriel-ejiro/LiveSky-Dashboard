@@ -120,7 +120,7 @@ resource "aws_lambda_function" "on_disconnect" {
 
 resource "aws_lambda_function" "broadcast" {
   function_name = "${var.project}-broadcast"
-  role          = aws_iam_role.lambda_role.arn"
+  role          = aws_iam_role.lambda_role.arn
   handler       = "broadcast.handler"
   runtime       = "python3.11"
   filename      = "lambda/broadcast.zip"
