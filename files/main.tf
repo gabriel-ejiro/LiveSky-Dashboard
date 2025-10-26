@@ -1,11 +1,19 @@
 terraform {
   required_version = ">= 1.6"
   required_providers {
-    aws = { source = "hashicorp/aws", version = "~> 5.0" }
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
   }
 }
 
-provider "aws" { region = var.region }
+provider "aws" {
+  region = var.region
+}
+
+# Who am I? (for ARNs)
+data "aws_caller_identity" "current" {}
 
 # ----------------- DynamoDB -----------------
 resource "aws_dynamodb_table" "connections" {
@@ -13,12 +21,21 @@ resource "aws_dynamodb_table" "connections" {
   billing_mode = "PAY_PER_REQUEST"
   hash_key     = "connectionId"
 
-  attribute { name = "connectionId"; type = "S" }
+  attribute {
+    name = "connectionId"
+    type = "S"
+  }
 }
 
 # ----------------- IAM Roles -----------------
 data "aws_iam_policy_document" "lambda_assume" {
-  statement { actions = ["sts:AssumeRole"]; principals { type = "service"; identifiers = ["lambda.amazonaws.com"] } }
+  statement {
+    actions = ["sts:AssumeRole"]
+    principals {
+      type        = "service"
+      identifiers = ["lambda.amazonaws.com"]
+    }
+  }
 }
 
 resource "aws_iam_role" "lambda_role" {
@@ -26,20 +43,28 @@ resource "aws_iam_role" "lambda_role" {
   assume_role_policy = data.aws_iam_policy_document.lambda_assume.json
 }
 
+# Narrowest possible @connections permission (scoped to this API + stage)
+# We can reference api+stage because Terraform knows them at plan time.
+locals {
+  manage_conn_arn = "arn:aws:execute-api:${var.region}:${data.aws_caller_identity.current.account_id}:${aws_apigatewayv2_api.ws.id}/${var.stage}/POST/@connections/*"
+}
+
 data "aws_iam_policy_document" "lambda_policy" {
   statement {
-    sid     = "DDBAccess"
-    actions = ["dynamodb:PutItem","dynamodb:DeleteItem","dynamodb:Scan"]
+    sid       = "DDBAccess"
+    actions   = ["dynamodb:PutItem", "dynamodb:DeleteItem", "dynamodb:Scan"]
     resources = [aws_dynamodb_table.connections.arn]
   }
+
   statement {
-    sid     = "ManageConnections"
-    actions = ["execute-api:ManageConnections"]
-    resources = ["arn:aws:execute-api:${var.region}:*:*/*/POST/@connections/*"]
+    sid       = "ManageConnections"
+    actions   = ["execute-api:ManageConnections"]
+    resources = [local.manage_conn_arn]
   }
+
   statement {
     sid     = "Logs"
-    actions = ["logs:CreateLogGroup","logs:CreateLogStream","logs:PutLogEvents"]
+    actions = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
     resources = ["*"]
   }
 }
@@ -61,13 +86,16 @@ resource "aws_apigatewayv2_api" "ws" {
   route_selection_expression = "$request.body.action"
 }
 
-# Lambdas
+# ----------------- Lambdas -----------------
 resource "aws_lambda_function" "on_connect" {
   function_name = "${var.project}-onconnect"
   role          = aws_iam_role.lambda_role.arn
   handler       = "on_connect.handler"
   runtime       = "python3.11"
   filename      = "lambda/on_connect.zip"
+  # optional but recommended so TF knows when to update code:
+  # source_code_hash = filebase64sha256("lambda/on_connect.zip")
+
   environment {
     variables = {
       TABLE_NAME = aws_dynamodb_table.connections.name
@@ -81,6 +109,8 @@ resource "aws_lambda_function" "on_disconnect" {
   handler       = "on_disconnect.handler"
   runtime       = "python3.11"
   filename      = "lambda/on_disconnect.zip"
+  # source_code_hash = filebase64sha256("lambda/on_disconnect.zip")
+
   environment {
     variables = {
       TABLE_NAME = aws_dynamodb_table.connections.name
@@ -90,22 +120,23 @@ resource "aws_lambda_function" "on_disconnect" {
 
 resource "aws_lambda_function" "broadcast" {
   function_name = "${var.project}-broadcast"
-  role          = aws_iam_role.lambda_role.arn
+  role          = aws_iam_role.lambda_role.arn"
   handler       = "broadcast.handler"
   runtime       = "python3.11"
   filename      = "lambda/broadcast.zip"
+  # source_code_hash = filebase64sha256("lambda/broadcast.zip")
+
   environment {
     variables = {
       TABLE_NAME = aws_dynamodb_table.connections.name
       REGION     = var.region
       STAGE      = var.stage
-      # API_ID filled after stage creation via environment update below
-      API_ID     = ""
+      API_ID     = aws_apigatewayv2_api.ws.id
     }
   }
 }
 
-# Integrations
+# ----------------- Integrations -----------------
 resource "aws_apigatewayv2_integration" "connect_integ" {
   api_id                 = aws_apigatewayv2_api.ws.id
   integration_type       = "AWS_PROXY"
@@ -120,7 +151,7 @@ resource "aws_apigatewayv2_integration" "disconnect_integ" {
   payload_format_version = "2.0"
 }
 
-# Routes
+# ----------------- Routes -----------------
 resource "aws_apigatewayv2_route" "connect" {
   api_id    = aws_apigatewayv2_api.ws.id
   route_key = "$connect"
@@ -133,13 +164,14 @@ resource "aws_apigatewayv2_route" "disconnect" {
   target    = "integrations/${aws_apigatewayv2_integration.disconnect_integ.id}"
 }
 
-# Permissions for API Gateway to call Lambdas
+# ----------------- Permissions (API Gateway -> Lambdas) -----------------
+# For WebSocket routes, scope to route specifically.
 resource "aws_lambda_permission" "apigw_connect" {
   statement_id  = "AllowConnectInvoke"
   action        = "lambda:InvokeFunction"
   function_name = aws_lambda_function.on_connect.function_name
   principal     = "apigateway.amazonaws.com"
-  source_arn    = "${aws_apigatewayv2_api.ws.execution_arn}/*/*"
+  source_arn    = "${aws_apigatewayv2_api.ws.execution_arn}/*/$connect"
 }
 
 resource "aws_lambda_permission" "apigw_disconnect" {
@@ -147,45 +179,17 @@ resource "aws_lambda_permission" "apigw_disconnect" {
   action        = "lambda:InvokeFunction"
   function_name = aws_lambda_function.on_disconnect.function_name
   principal     = "apigateway.amazonaws.com"
-  source_arn    = "${aws_apigatewayv2_api.ws.execution_arn}/*/*"
+  source_arn    = "${aws_apigatewayv2_api.ws.execution_arn}/*/$disconnect"
 }
 
-# Stage + Deployment
+# ----------------- Stage -----------------
 resource "aws_apigatewayv2_stage" "stage" {
   api_id      = aws_apigatewayv2_api.ws.id
   name        = var.stage
   auto_deploy = true
 }
 
-# Now that API exists, inject API_ID into broadcast Lambda env
-resource "aws_lambda_function_event_invoke_config" "broadcast_async" {
-  function_name = aws_lambda_function.broadcast.function_name
-  maximum_retry_attempts = 0
-}
-
-resource "aws_lambda_environment" "broadcast_env_update" {
-  # (Uses Terraform 'replace' pattern via a null_resource + triggers)
-}
-
-# Simpler: update broadcast's env inline by recreating it when API is ready:
-resource "aws_lambda_alias" "broadcast_alias" {
-  name             = "live"
-  function_name    = aws_lambda_function.broadcast.arn
-  function_version = "$LATEST"
-  provisioned_concurrent_executions = 0
-
-  lifecycle { ignore_changes = [provisioned_concurrent_executions] }
-}
-
-resource "aws_lambda_provisioned_concurrency_config" "noop" {
-  # dummy to ensure apply order; not strictly needed
-  function_name = aws_lambda_alias.broadcast_alias.function_name
-  qualifier     = aws_lambda_alias.broadcast_alias.name
-  provisioned_concurrent_executions = 0
-  lifecycle { ignore_changes = [provisioned_concurrent_executions] }
-}
-
-# EventBridge scheduler
+# ----------------- EventBridge (Scheduled broadcast) -----------------
 resource "aws_cloudwatch_event_rule" "every5" {
   name                = "${var.project}-every5"
   schedule_expression = "rate(5 minutes)"
@@ -223,25 +227,29 @@ resource "aws_s3_bucket_policy" "site_policy" {
   policy = jsonencode({
     Version = "2012-10-17",
     Statement = [{
-      Sid = "PublicRead",
-      Effect = "Allow",
+      Sid       = "PublicRead",
+      Effect    = "Allow",
       Principal = "*",
-      Action = ["s3:GetObject"],
-      Resource = ["${aws_s3_bucket.site.arn}/*"]
+      Action    = ["s3:GetObject"],
+      Resource  = ["${aws_s3_bucket.site.arn}/*"]
     }]
   })
 }
 
 resource "aws_s3_bucket_website_configuration" "site_web" {
   bucket = aws_s3_bucket.site.id
-  index_document { suffix = "index.html" }
+
+  index_document {
+    suffix = "index.html"
+  }
 }
 
 # --------------- Outputs ---------------
 output "websocket_wss_url" {
-  value = "wss://${aws_apigatewayv2_api.ws.api_endpoint.replace("https://","")}/${var.stage}"
+  value = "wss://${replace(aws_apigatewayv2_api.ws.api_endpoint, "https://", "")}/${var.stage}"
 }
 
 output "site_url" {
   value = "http://${aws_s3_bucket_website_configuration.site_web.website_endpoint}"
 }
+
