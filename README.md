@@ -1,3 +1,4 @@
+'''
 flowchart LR
 A[S3 Static Site\nindex.html] -- wss --> B[API Gateway WebSocket\nRoutes: $connect/$disconnect/sendmessage]
 B <---> C[Lambda on_connect / on_disconnect]
