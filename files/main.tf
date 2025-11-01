@@ -43,22 +43,21 @@ resource "aws_iam_role" "lambda_role" {
   assume_role_policy = data.aws_iam_policy_document.lambda_assume.json
 }
 
-# Narrowest possible @connections permission (scoped to this API + stage)
-# We can reference api+stage because Terraform knows them at plan time.
 locals {
+  # Narrowest possible @connections permission (scoped to this API + stage)
   manage_conn_arn = "arn:aws:execute-api:${var.region}:${data.aws_caller_identity.current.account_id}:${aws_apigatewayv2_api.ws.id}/${var.stage}/POST/@connections/*"
 }
 
 data "aws_iam_policy_document" "lambda_policy" {
   statement {
-    sid       = "DDBAccess"
-    actions   = ["dynamodb:PutItem", "dynamodb:DeleteItem", "dynamodb:Scan"]
+    sid     = "DDBAccess"
+    actions = ["dynamodb:PutItem", "dynamodb:DeleteItem", "dynamodb:Scan"]
     resources = [aws_dynamodb_table.connections.arn]
   }
 
   statement {
-    sid       = "ManageConnections"
-    actions   = ["execute-api:ManageConnections"]
+    sid     = "ManageConnections"
+    actions = ["execute-api:ManageConnections"]
     resources = [local.manage_conn_arn]
   }
 
@@ -87,14 +86,14 @@ resource "aws_apigatewayv2_api" "ws" {
 }
 
 # ----------------- Lambdas -----------------
+# NOTE: Your code/zips live in ../lambda relative to this files/ module.
 resource "aws_lambda_function" "on_connect" {
-  function_name = "${var.project}-onconnect"
-  role          = aws_iam_role.lambda_role.arn
-  handler       = "on_connect.handler"
-  runtime       = "python3.11"
-  filename      = "lambda/on_connect.zip"
-  # optional but recommended so TF knows when to update code:
-  # source_code_hash = filebase64sha256("lambda/on_connect.zip")
+  function_name    = "${var.project}-onconnect"
+  role             = aws_iam_role.lambda_role.arn
+  handler          = "on_connect.handler"   # on_connect.py -> def handler(event, context):
+  runtime          = "python3.11"
+  filename         = abspath("${path.module}/../lambda/on_connect.zip")
+  source_code_hash = filebase64sha256(abspath("${path.module}/../lambda/on_connect.zip"))
 
   environment {
     variables = {
@@ -104,12 +103,12 @@ resource "aws_lambda_function" "on_connect" {
 }
 
 resource "aws_lambda_function" "on_disconnect" {
-  function_name = "${var.project}-ondisconnect"
-  role          = aws_iam_role.lambda_role.arn
-  handler       = "on_disconnect.handler"
-  runtime       = "python3.11"
-  filename      = "lambda/on_disconnect.zip"
-  # source_code_hash = filebase64sha256("lambda/on_disconnect.zip")
+  function_name    = "${var.project}-ondisconnect"
+  role             = aws_iam_role.lambda_role.arn
+  handler          = "on_disconnect.handler"
+  runtime          = "python3.11"
+  filename         = abspath("${path.module}/../lambda/on_disconnect.zip")
+  source_code_hash = filebase64sha256(abspath("${path.module}/../lambda/on_disconnect.zip"))
 
   environment {
     variables = {
@@ -119,12 +118,12 @@ resource "aws_lambda_function" "on_disconnect" {
 }
 
 resource "aws_lambda_function" "broadcast" {
-  function_name = "${var.project}-broadcast"
-  role          = aws_iam_role.lambda_role.arn
-  handler       = "broadcast.handler"
-  runtime       = "python3.11"
-  filename      = "lambda/broadcast.zip"
-  # source_code_hash = filebase64sha256("lambda/broadcast.zip")
+  function_name    = "${var.project}-broadcast"
+  role             = aws_iam_role.lambda_role.arn
+  handler          = "broadcast.handler"
+  runtime          = "python3.11"
+  filename         = abspath("${path.module}/../lambda/broadcast.zip")
+  source_code_hash = filebase64sha256(abspath("${path.module}/../lambda/broadcast.zip"))
 
   environment {
     variables = {
@@ -165,7 +164,6 @@ resource "aws_apigatewayv2_route" "disconnect" {
 }
 
 # ----------------- Permissions (API Gateway -> Lambdas) -----------------
-# For WebSocket routes, scope to route specifically.
 resource "aws_lambda_permission" "apigw_connect" {
   statement_id  = "AllowConnectInvoke"
   action        = "lambda:InvokeFunction"
