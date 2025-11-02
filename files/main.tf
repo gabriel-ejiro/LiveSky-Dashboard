@@ -12,10 +12,10 @@ provider "aws" {
   region = var.region
 }
 
-# Who am I? (for ARNs)
+# Who am I?
 data "aws_caller_identity" "current" {}
 
-# ----------------- DynamoDB -----------------
+# ----------------- DynamoDB (connections table) -----------------
 resource "aws_dynamodb_table" "connections" {
   name         = "${var.project}-connections"
   billing_mode = "PAY_PER_REQUEST"
@@ -27,12 +27,13 @@ resource "aws_dynamodb_table" "connections" {
   }
 }
 
-# ----------------- IAM Roles -----------------
+# ----------------- IAM: Lambda trust + permissions -----------------
 data "aws_iam_policy_document" "lambda_assume" {
   statement {
+    effect  = "Allow"
     actions = ["sts:AssumeRole"]
     principals {
-      type        = "Service"
+      type        = "Service"              # Capital S (required)
       identifiers = ["lambda.amazonaws.com"]
     }
   }
@@ -43,15 +44,19 @@ resource "aws_iam_role" "lambda_role" {
   assume_role_policy = data.aws_iam_policy_document.lambda_assume.json
 }
 
+# ManageConnections ARN scoped to your API+stage
 locals {
-  # Narrowest possible @connections permission (scoped to this API + stage)
   manage_conn_arn = "arn:aws:execute-api:${var.region}:${data.aws_caller_identity.current.account_id}:${aws_apigatewayv2_api.ws.id}/${var.stage}/POST/@connections/*"
 }
 
 data "aws_iam_policy_document" "lambda_policy" {
   statement {
     sid     = "DDBAccess"
-    actions = ["dynamodb:PutItem", "dynamodb:DeleteItem", "dynamodb:Scan"]
+    actions = [
+      "dynamodb:PutItem",
+      "dynamodb:DeleteItem",
+      "dynamodb:Scan"
+    ]
     resources = [aws_dynamodb_table.connections.arn]
   }
 
@@ -63,7 +68,11 @@ data "aws_iam_policy_document" "lambda_policy" {
 
   statement {
     sid     = "Logs"
-    actions = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
+    actions = [
+      "logs:CreateLogGroup",
+      "logs:CreateLogStream",
+      "logs:PutLogEvents"
+    ]
     resources = ["*"]
   }
 }
@@ -78,6 +87,12 @@ resource "aws_iam_role_policy_attachment" "lambda_attach" {
   policy_arn = aws_iam_policy.lambda_policy.arn
 }
 
+# Basic logging for all Lambdas
+resource "aws_iam_role_policy_attachment" "lambda_basic_logs" {
+  role       = aws_iam_role.lambda_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+}
+
 # ----------------- WebSocket API -----------------
 resource "aws_apigatewayv2_api" "ws" {
   name                       = "${var.project}-ws"
@@ -85,12 +100,12 @@ resource "aws_apigatewayv2_api" "ws" {
   route_selection_expression = "$request.body.action"
 }
 
-# ----------------- Lambdas -----------------
-# NOTE: Your code/zips live in ../lambda relative to this files/ module.
+# ----------------- Lambdas (zip files must exist at ../lambda/*.zip) -----------------
+# Handlers should be: on_connect.py:handler, on_disconnect.py:handler, broadcast.py:handler
 resource "aws_lambda_function" "on_connect" {
   function_name    = "${var.project}-onconnect"
   role             = aws_iam_role.lambda_role.arn
-  handler          = "on_connect.handler"   # on_connect.py -> def handler(event, context):
+  handler          = "on_connect.handler"
   runtime          = "python3.11"
   filename         = abspath("${path.module}/../lambda/on_connect.zip")
   source_code_hash = filebase64sha256(abspath("${path.module}/../lambda/on_connect.zip"))
@@ -164,12 +179,13 @@ resource "aws_apigatewayv2_route" "disconnect" {
 }
 
 # ----------------- Permissions (API Gateway -> Lambdas) -----------------
+# Use /*/* during bring-up to avoid route-stage timing issues; you can tighten later to /*/$connect and /*/$disconnect.
 resource "aws_lambda_permission" "apigw_connect" {
   statement_id  = "AllowConnectInvoke"
   action        = "lambda:InvokeFunction"
   function_name = aws_lambda_function.on_connect.function_name
   principal     = "apigateway.amazonaws.com"
-  source_arn    = "${aws_apigatewayv2_api.ws.execution_arn}/*/$connect"
+  source_arn    = "${aws_apigatewayv2_api.ws.execution_arn}/*/*"
 }
 
 resource "aws_lambda_permission" "apigw_disconnect" {
@@ -177,14 +193,31 @@ resource "aws_lambda_permission" "apigw_disconnect" {
   action        = "lambda:InvokeFunction"
   function_name = aws_lambda_function.on_disconnect.function_name
   principal     = "apigateway.amazonaws.com"
-  source_arn    = "${aws_apigatewayv2_api.ws.execution_arn}/*/$disconnect"
+  source_arn    = "${aws_apigatewayv2_api.ws.execution_arn}/*/*"
 }
 
-# ----------------- Stage -----------------
+# ----------------- Stage + Access Logs -----------------
+resource "aws_cloudwatch_log_group" "apigw_ws" {
+  name              = "/aws/apigw/${var.project}-ws"
+  retention_in_days = 7
+}
+
 resource "aws_apigatewayv2_stage" "stage" {
   api_id      = aws_apigatewayv2_api.ws.id
   name        = var.stage
   auto_deploy = true
+
+  access_log_settings {
+    destination_arn = aws_cloudwatch_log_group.apigw_ws.arn
+    format = jsonencode({
+      requestId    = "$context.requestId",
+      eventType    = "$context.eventType",
+      routeKey     = "$context.routeKey",
+      status       = "$context.status",
+      connectionId = "$context.connectionId",
+      error        = "$context.error.message"
+    })
+  }
 }
 
 # ----------------- EventBridge (Scheduled broadcast) -----------------
@@ -207,7 +240,7 @@ resource "aws_lambda_permission" "allow_events" {
   source_arn    = aws_cloudwatch_event_rule.every5.arn
 }
 
-# --------------- S3 Static Site ---------------
+# ----------------- S3 Static Site -----------------
 resource "aws_s3_bucket" "site" {
   bucket = "${var.project}-site-${var.region}"
 }
@@ -242,12 +275,24 @@ resource "aws_s3_bucket_website_configuration" "site_web" {
   }
 }
 
-# --------------- Outputs ---------------
+# ----------------- Outputs -----------------
+output "api_id" {
+  value = aws_apigatewayv2_api.ws.id
+}
+
+output "stage" {
+  value = var.stage
+}
+
+output "manage_connections_arn" {
+  value = local.manage_conn_arn
+}
+
+# For WebSocket APIs, api_endpoint is already wss://… — append stage as-is
 output "websocket_wss_url" {
-  value = "wss://${replace(aws_apigatewayv2_api.ws.api_endpoint, "https://", "")}/${var.stage}"
+  value = format("%s/%s", aws_apigatewayv2_api.ws.api_endpoint, var.stage)
 }
 
 output "site_url" {
-  value = "http://${aws_s3_bucket_website_configuration.site_web.website_endpoint}"
+  value = format("http://%s", aws_s3_bucket_website_configuration.site_web.website_endpoint)
 }
-
