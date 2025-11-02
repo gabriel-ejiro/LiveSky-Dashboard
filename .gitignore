@@ -1,14 +1,16 @@
+# Terraform
 .terraform/
 *.tfstate
 *.tfstate.*
-crash.log
-override.tf
-override.tf.json
-*.tfvars
-*.tfvars.json
-!*.terraform.lock.hcl
+.terraform.tfstate.lock.info
+.terraform.lock.hcl
 
-lambda/*.zip
-.env*
-.vscode/
-.idea/
+# Lambda build zips
+*.zip
+
+# OS / IDE junk
+.DS_Store
+*.log
+venv/
+__pycache__/
+

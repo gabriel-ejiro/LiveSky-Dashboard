@@ -1,0 +1,32 @@
+<!doctype html>
+<html>
+  <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>WeatherWS</title>
+    <style>body{font-family:system-ui,Arial;margin:2rem}.card{padding:1rem;border:1px solid #ddd;border-radius:12px;max-width:520px}</style>
+  </head>
+  <body>
+    <h1>Live Weather</h1>
+    <div class="card">
+      <div id="status">Connecting…</div>
+      <pre id="data">—</pre>
+    </div>
+    <script>
+      const wss = "WSS_URL";
+      const status = document.getElementById('status');
+      const dataEl = document.getElementById('data');
+      function connect(){
+        const ws = new WebSocket(wss);
+        ws.onopen = () => status.textContent = "Connected";
+        ws.onclose = () => { status.textContent = "Disconnected. Reconnecting…"; setTimeout(connect, 3000); };
+        ws.onerror = () => status.textContent = "Error";
+        ws.onmessage = (evt) => {
+          try { const msg = JSON.parse(evt.data);
+            if (msg.type === "weather") dataEl.textContent = JSON.stringify(msg.data, null, 2);
+            else dataEl.textContent = evt.data;
+          } catch { dataEl.textContent = evt.data; }
+        };
+      }
+      connect();
+    </script>
+  </body>
+</html>
